@@ -1,4 +1,4 @@
-﻿// ===================== Center TPS — Map OBJ + Jump + Collisions + Step-up =====================
+// ===================== Center TPS — Map OBJ + Jump + Collisions + Step-up (Height-Aware Walls) =====================
 // Controls:
 //   Mouse  : rotate camera (player faces camera yaw)
 //   WASD   : move relative to camera
@@ -92,19 +92,19 @@ std::vector<Bullet> gBullets;
 
 // ---------- 2D AABB (XZ) ----------
 struct AABB2D { glm::vec2 center, halfExt; };
-static inline bool Intersects(const AABB2D& a, const AABB2D& b) {
+static inline bool IntersectsXZ(const AABB2D& a, const AABB2D& b) {
     if (std::abs(a.center.x - b.center.x) > (a.halfExt.x + b.halfExt.x)) return false;
     if (std::abs(a.center.y - b.center.y) > (a.halfExt.y + b.halfExt.y)) return false;
     return true;
 }
-static inline void ResolveStatic(const AABB2D& statBox, AABB2D& dynBox, glm::vec3& playerPosXZ) {
+static inline void ResolveStaticXZ(const AABB2D& statBox, AABB2D& dynBox, glm::vec3& posXZ) {
     float dx = dynBox.center.x - statBox.center.x;
     float dz = dynBox.center.y - statBox.center.y;
     float px = (dynBox.halfExt.x + statBox.halfExt.x) - std::abs(dx);
     float pz = (dynBox.halfExt.y + statBox.halfExt.y) - std::abs(dz);
     if (px < 0 || pz < 0) return;
-    if (px < pz) { float sx = (dx < 0 ? -1.f : 1.f); playerPosXZ.x += sx * px; dynBox.center.x += sx * px; }
-    else { float sz = (dz < 0 ? -1.f : 1.f); playerPosXZ.z += sz * pz; dynBox.center.y += sz * pz; }
+    if (px < pz) { float sx = (dx < 0 ? -1.f : 1.f); posXZ.x += sx * px; dynBox.center.x += sx * px; }
+    else { float sz = (dz < 0 ? -1.f : 1.f); posXZ.z += sz * pz; dynBox.center.y += sz * pz; }
 }
 
 // ---------- Map placement ----------
@@ -117,11 +117,18 @@ float ENEMY_FOOT_BIAS = 1.15f;
 
 // ---------- Map collision data ----------
 struct Tri { glm::vec3 a, b, c; glm::vec3 n; };
-std::vector<Tri>    gFloorTris;
-std::vector<AABB2D> gWallBoxes;
 
-const float FLOOR_MIN_NY = 0.55f; // treat as floor if normal.y >= this
-const float WALL_MAX_NY = 0.25f; // treat as wall if |normal.y| <= this
+// Height-aware wall box
+struct WallBox {
+    AABB2D boxXZ;
+    float  minY, maxY;
+};
+
+std::vector<Tri>     gFloorTris;
+std::vector<WallBox> gWalls;
+
+const float FLOOR_MIN_NY = 0.55f; // treat tri as floor if normal.y >= this
+const float WALL_MAX_NY = 0.25f; // treat tri as wall if |normal.y| <= this
 
 glm::mat4 MapTransform() {
     glm::mat4 M(1.0f);
@@ -133,7 +140,7 @@ glm::mat4 MapTransform() {
 
 void BuildMapCollision(const Model& mapModel) {
     gFloorTris.clear();
-    gWallBoxes.clear();
+    gWalls.clear();
 
     glm::mat4 T = MapTransform();
     for (const auto& mesh : mapModel.meshes) {
@@ -152,19 +159,27 @@ void BuildMapCollision(const Model& mapModel) {
                 gFloorTris.push_back({ a,b,c,n });
             }
             else if (ny <= WALL_MAX_NY) {
+                // Build a height-aware wall box
                 float minx = std::min({ a.x,b.x,c.x });
                 float maxx = std::max({ a.x,b.x,c.x });
                 float minz = std::min({ a.z,b.z,c.z });
                 float maxz = std::max({ a.z,b.z,c.z });
+                float miny = std::min({ a.y,b.y,c.y });
+                float maxy = std::max({ a.y,b.y,c.y });
                 const float m = 0.06f;
                 minx -= m; maxx += m; minz -= m; maxz += m;
-                gWallBoxes.push_back({ {(minx + maxx) * 0.5f,(minz + maxz) * 0.5f},
-                                       {(maxx - minx) * 0.5f,(maxz - minz) * 0.5f} });
+
+                WallBox w;
+                w.boxXZ = { {(minx + maxx) * 0.5f,(minz + maxz) * 0.5f},
+                            {(maxx - minx) * 0.5f,(maxz - minz) * 0.5f} };
+                w.minY = miny;
+                w.maxY = maxy;
+                gWalls.push_back(w);
             }
         }
     }
     std::cout << "[MapCollider] floors=" << gFloorTris.size()
-        << " walls=" << gWallBoxes.size() << "\n";
+        << " walls=" << gWalls.size() << "\n";
 }
 
 // Möller–Trumbore
@@ -203,6 +218,18 @@ float SampleFloorY(const glm::vec3& worldPosXZ) {
     return MAP_Y_OFFSET;
 }
 
+// Height-aware wall check
+inline bool IntersectsWallAtHeight(const WallBox& w, const AABB2D& ply, float footY) {
+    const float Y_PAD_DOWN = 0.6f;  // allow a bit of overlap below feet
+    const float Y_PAD_UP = 1.8f;  // wall height that can block (roughly up to chest/head)
+    if (footY < (w.minY - Y_PAD_DOWN) || footY >(w.maxY + Y_PAD_UP)) return false;
+    return IntersectsXZ(ply, w.boxXZ);
+}
+
+void ResolveStaticWall(const WallBox& w, AABB2D& dynBox, glm::vec3& posXZ) {
+    ResolveStaticXZ(w.boxXZ, dynBox, posXZ);
+}
+
 // ---------- Callbacks ----------
 void framebuffer_size_callback(GLFWwindow*, int w, int h) { glViewport(0, 0, w, h); }
 
@@ -238,11 +265,10 @@ bool TryMoveWithStepUp(glm::vec3& posXZ, const glm::vec3& moveXZ, float currentF
     AABB2D& playerBox, float& outNewFootY)
 {
     glm::vec3 candidate = posXZ + moveXZ;
-    AABB2D candBox = playerBox;
-    candBox.center = { candidate.x, candidate.z };
+    AABB2D candBox = playerBox; candBox.center = { candidate.x, candidate.z };
 
     bool collide = false;
-    for (const auto& wb : gWallBoxes) { if (Intersects(candBox, wb)) { collide = true; break; } }
+    for (const auto& w : gWalls) { if (IntersectsWallAtHeight(w, candBox, currentFootY)) { collide = true; break; } }
 
     if (!collide) { // free move
         posXZ = candidate; playerBox.center = candBox.center;
@@ -250,13 +276,18 @@ bool TryMoveWithStepUp(glm::vec3& posXZ, const glm::vec3& moveXZ, float currentF
         return true;
     }
 
-    // allow step-up if within threshold
+    // allow step-up if new floor is slightly higher
     float newFloorY = SampleFloorY(candidate);
     float diff = newFloorY - currentFootY;
     if (diff > -STEP_SNAP_EPS && diff <= STEP_MAX) {
-        posXZ = candidate; playerBox.center = candBox.center;
-        outNewFootY = newFloorY;
-        return true;
+        // also make sure at new height we aren't inside walls
+        bool collideNew = false;
+        for (const auto& w : gWalls) { if (IntersectsWallAtHeight(w, candBox, newFloorY)) { collideNew = true; break; } }
+        if (!collideNew) {
+            posXZ = candidate; playerBox.center = candBox.center;
+            outNewFootY = newFloorY;
+            return true;
+        }
     }
     return false;
 }
@@ -288,14 +319,12 @@ void processInput(GLFWwindow* w, glm::vec3& playerPosXZ, AABB2D& playerBox,
 
         float footYCandidate = playerFootY;
         if (!TryMoveWithStepUp(playerPosXZ, moveXZ, playerFootY, playerBox, footYCandidate)) {
-            AABB2D tmp = playerBox;
-            tmp.center = { playerPosXZ.x, playerPosXZ.z };
-
             // multi-pass push-out to reduce corner sticking
+            AABB2D tmp = playerBox; tmp.center = { playerPosXZ.x, playerPosXZ.z };
             for (int it = 0; it < UNSTICK_ITER; ++it) {
                 bool any = false;
-                for (const auto& wb : gWallBoxes) {
-                    if (Intersects(tmp, wb)) { ResolveStatic(wb, tmp, playerPosXZ); any = true; }
+                for (const auto& w : gWalls) {
+                    if (IntersectsWallAtHeight(w, tmp, playerFootY)) { ResolveStaticWall(w, tmp, playerPosXZ); any = true; }
                 }
                 if (!any) break;
             }
@@ -344,6 +373,33 @@ void updateFollowCamera(const glm::vec3& playerPosAbs) {
     camera.Front = glm::normalize(lookTarget - camera.Position);
     camera.Right = glm::normalize(glm::cross(camera.Front, up));
     camera.Up = glm::normalize(glm::cross(camera.Right, camera.Front));
+}
+
+// Try to nudge spawn out of walls if initial position is blocked
+void NudgeSpawn(glm::vec3& posXZ, AABB2D& box, float& footY) {
+    auto blocked = [&](const glm::vec3& p)->bool {
+        AABB2D b = box; b.center = { p.x, p.z };
+        for (const auto& w : gWalls) if (IntersectsWallAtHeight(w, b, footY)) return true;
+        return false;
+        };
+    if (!blocked(posXZ)) return;
+
+    const float STEP = 0.5f;
+    for (int r = 1; r <= 40; ++r) {
+        for (int dx = -r; dx <= r; ++dx) {
+            for (int dz = -r; dz <= r; ++dz) {
+                glm::vec3 c = posXZ + glm::vec3(dx * STEP, 0, dz * STEP);
+                float y = SampleFloorY(c);
+                float f = y;
+                if (!blocked(c)) {
+                    posXZ = c; box.center = { c.x, c.z };
+                    footY = f;
+                    std::cout << "[Spawn] nudged to (" << c.x << "," << c.z << ")\n";
+                    return;
+                }
+            }
+        }
+    }
 }
 
 int main() {
@@ -395,6 +451,10 @@ int main() {
     glm::vec3 playerAbs(0), enemyAbs(0), itemAbs(0);
 
     float playerFootY = SampleFloorY(playerPosXZ);
+
+    // If spawn overlaps walls at this height, nudge to a nearby free spot
+    NudgeSpawn(playerPosXZ, playerBox, playerFootY);
+
     playerAbs = { playerPosXZ.x, playerFootY + PLAYER_FOOT_BIAS, playerPosXZ.z };
 
     bool  mapDirty = false;
@@ -446,7 +506,7 @@ int main() {
         playerAbs.x = playerPosXZ.x;
         playerAbs.z = playerPosXZ.z;
 
-        // Unstick pass (shrunken collider to escape corners)
+        // Unstick pass (height-aware)
         {
             AABB2D b = playerBox;
             b.halfExt.x = std::max(0.01f, b.halfExt.x - SKIN);
@@ -454,8 +514,8 @@ int main() {
 
             for (int it = 0; it < UNSTICK_ITER; ++it) {
                 bool any = false;
-                for (const auto& wb : gWallBoxes) {
-                    if (Intersects(b, wb)) { ResolveStatic(wb, b, playerPosXZ); any = true; }
+                for (const auto& w : gWalls) {
+                    if (IntersectsWallAtHeight(w, b, playerFootY)) { ResolveStaticWall(w, b, playerPosXZ); any = true; }
                 }
                 if (!any) break;
             }
@@ -464,7 +524,7 @@ int main() {
             playerAbs.z = playerPosXZ.z;
         }
 
-        // Step-down snap (smoothly descend small ledges)
+        // Step-down snap (smooth descent)
         {
             float newFloor = SampleFloorY(playerPosXZ);
             float drop = playerFootY - newFloor;
@@ -484,14 +544,14 @@ int main() {
             gBullets.push_back(b); gShootCooldown = 0.12f;
         }
 
-        // Enemy patrolling (simple demo)
+        // Enemy patrolling (demo)
         enemyPosXZ.x += enemyDir * enemySpeed * deltaTime;
         if (enemyPosXZ.x > -6.f + enemyAmp) enemyDir = -1.f;
         if (enemyPosXZ.x < -6.f - enemyAmp) enemyDir = 1.f;
 
         // Item pickup
         itemBox.center = { itemPosXZ.x, itemPosXZ.z };
-        if (!itemCollected && Intersects(playerBox, itemBox)) { itemCollected = true; gWalkSpeed = 12.0f; }
+        if (!itemCollected && IntersectsXZ(playerBox, itemBox)) { itemCollected = true; gWalkSpeed = 12.0f; }
 
         // Bullet hits
         enemyBox.center = { enemyPosXZ.x, enemyPosXZ.z };
@@ -500,7 +560,7 @@ int main() {
             b.life -= deltaTime;
             if (b.life <= 0.0f) b.active = false;
             AABB2D bb{ {b.pos.x,b.pos.z},{b.radius,b.radius} };
-            if (b.active && Intersects(bb, enemyBox)) { b.active = false; enemyHP--; }
+            if (b.active && IntersectsXZ(bb, enemyBox)) { b.active = false; enemyHP--; }
         }
         gBullets.erase(std::remove_if(gBullets.begin(), gBullets.end(),
             [](const Bullet& b) { return !b.active; }), gBullets.end());
