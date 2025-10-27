@@ -1,6 +1,6 @@
 ## Demo
 
-[![Watch the demo](media/demo.gif)](https://github.com/<your-username>/<your-repo-name>/raw/main/media/demo.mp4)
+[![Watch the demo](media/demo.gif)](https://github.com/gygigies/Assignment4/blob/main/demo.mp4)
 
 ---
 
