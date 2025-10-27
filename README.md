@@ -1,6 +1,6 @@
 ## Demo
 
-(media/demo.gif)(https://github.com/gygigies/Assignment4/blob/main/demo.mp4)
+https://github.com/gygigies/Assignment4/blob/main/demo.mp4
 
 ---
 
