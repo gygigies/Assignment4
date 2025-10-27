@@ -1,6 +1,6 @@
 ## Demo
 
-https://github.com/user-attachments/assets/86471327-a106-431b-abad-fa0cc43e27de
+[demo.mp4](https://github.com/user-attachments/assets/86471327-a106-431b-abad-fa0cc43e27de)
 ---
 
 ## Controls
